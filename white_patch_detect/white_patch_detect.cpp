@@ -141,6 +141,7 @@ public:
     super_huoji_tracker(uint64_t startAddr, size_t sizeOfCode, uint64_t current_function_rva);
     ~super_huoji_tracker();
     auto track_gs_access() -> void;
+    auto track_fs_access() -> void;
 
 private:
     std::vector<std::shared_ptr<cs_insn>> ins_list;
@@ -223,6 +224,83 @@ auto super_huoji_tracker::match_code(
     return false;
 }
 
+auto super_huoji_tracker::track_fs_access() -> void
+{
+    //const auto matched_gs_access = match_code([&](cs_insn* instruction) {}, [&](cs_insn* instruction) {}, {}, {});
+    const auto isGsRegAccess = match_code([&](cs_insn* instruction) {
+        //@todo: other access gs reg code...
+        if (instruction->id != X86_INS_MOV && instruction->id != X86_INS_MOVZX) {
+            return false;
+        }
+
+        if (instruction->detail->x86.operands[1].mem.segment != X86_REG_FS) {
+            return false;
+        }
+        /*
+            gs:[0x30] TEB
+            gs:[0x40] Pid
+            gs:[0x48] Tid
+            gs:[0x60] PEB
+            gs:[0x68] LastError
+        */
+        if (instruction->detail->x86.operands[1].mem.disp != 0x18 && instruction->detail->x86.operands[1].mem.disp != 0x30) {
+            return false;
+        }
+        return true;
+    }, [&](cs_insn* instruction) {}, {}, {});
+    if (isGsRegAccess == false) {
+        return;
+    }
+    const auto currentIns = this->ins_list[this->ins_ip - 1].get();
+    const auto fsAccessReg = currentIns->detail->x86.operands[0].reg;
+    x86_reg ldrAccessReg;
+    bool isPebAccess = false;
+    if (currentIns->detail->x86.operands[1].mem.disp == 0x18) {
+        //从TEB访问的PEB->ldr
+        isPebAccess = match_code([&](cs_insn* instruction) {
+            //@todo: other access gs reg code...
+            if (instruction->id != X86_INS_MOV && instruction->id != X86_INS_MOVZX) {
+                return false;
+            }
+
+            if (instruction->detail->x86.operands[1].mem.base != fsAccessReg) {
+                return false;
+            }
+            if (instruction->detail->x86.operands[1].mem.disp != 0x30) {
+                return false;
+            }
+            ldrAccessReg = instruction->detail->x86.operands[0].reg;
+            return true;
+        }, [&](cs_insn* instruction) {}, {}, {});
+    }
+    else {
+        //直接访问的GS->peb
+        isPebAccess = true;
+        ldrAccessReg = fsAccessReg;
+    }
+    if (isPebAccess == false){
+        return;
+    }
+    //访问了PEB的ldr
+    const auto isPebLdrAccess = match_code([&](cs_insn* instruction) {
+        //@todo: other access gs reg code...
+        if (instruction->id != X86_INS_MOV && instruction->id != X86_INS_MOVZX) {
+            return false;
+        }
+        if (instruction->detail->x86.operands[1].mem.base != ldrAccessReg) {
+            return false;
+        }
+        if (instruction->detail->x86.operands[1].mem.disp != 0xc) {
+            return false;
+        }
+        return true;
+        }, [&](cs_insn* instruction) {}, {}, {});
+    if (isPebLdrAccess == false) {
+        return;
+    }
+    printf("mawlare function detected at address: 0x%llx by fs access peb->ldr \n", this->current_function_rva);
+    this->print_asm(currentIns);
+}
 auto super_huoji_tracker::track_gs_access() -> void
 {
     //const auto matched_gs_access = match_code([&](cs_insn* instruction) {}, [&](cs_insn* instruction) {}, {}, {});
